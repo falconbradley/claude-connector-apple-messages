@@ -1,0 +1,36 @@
+# Build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Dev files
+.git/
+.github/
+.venv/
+.env
+.env.*
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Claude config (not part of the extension)
+.claude/
+
+# Kangentic (local AI workflow tool — sessions can contain conversation history)
+.kangentic/
+kangentic.json
+
+# Old install script (replaced by mcpb install flow)
+install.sh
+
+# Dev harness — runs MailBridge directly without MCPB rebuild; not shipped.
+tools/
