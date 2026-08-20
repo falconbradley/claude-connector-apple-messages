@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from apple_messages_mcp.db import APPLE_EPOCH_OFFSET, MessagesDB  # noqa: E402
+from apple_messages_mcp.index import SearchIndex  # noqa: E402
 
 SCHEMA = """
 CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
@@ -112,6 +113,44 @@ def build(path: Path) -> None:
     conn.close()
 
 
+def build_deep(path: Path, filler: int = 3000) -> None:
+    """A history with one old needle buried under many newer messages.
+
+    Shaped like a real library in the way that matters: the filler rows carry a
+    populated ``attributedBody``, which is the norm since Ventura and is what
+    made the old search predicate match essentially every row.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO handle VALUES (1, '+15551234567', 'iMessage')")
+    conn.execute(
+        "INSERT INTO chat VALUES (1, 'iMessage;-;+15551234567', "
+        "'+15551234567', NULL, 'iMessage', 45)"
+    )
+    conn.execute("INSERT INTO chat_handle_join VALUES (1, 1)")
+
+    day = 86_400 * 1_000_000_000
+    rows = [
+        # ROWID 1: the oldest message, and the only "dentist" / "café" match.
+        (1, "old", "Dentist appointment at the café Monday", None, 100 * day,
+         None, None, None, 0, 1, "iMessage", 1, 0, 0, None),
+    ]
+    for i in range(2, filler + 2):
+        rows.append(
+            (i, f"f{i}", None, typedstream_blob(f"filler {i - 1}"),
+             (100 + i) * day, None, None, None, 0, 1, "iMessage", 1, 0, 0, None)
+        )
+    conn.executemany(
+        "INSERT INTO message VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
+    )
+    conn.executemany(
+        "INSERT INTO chat_message_join VALUES (1, ?)",
+        [(r[0],) for r in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
 CHECKS: list[tuple[str, bool]] = []
 
 
@@ -124,7 +163,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "chat.db"
         build(path)
-        db = MessagesDB(path)
+        # Always inject a throwaway index: the default lives in the user's real
+        # ~/Library/Caches, and a test run must not touch it.
+        db = MessagesDB(path, index=SearchIndex(Path(tmp) / "index.db"))
 
         print("== stats ==")
         s = db.stats()
@@ -178,6 +219,85 @@ def main() -> int:
         check("date filter", len(ranged) == 1 and ranged[0]["id"] == 5, str([h["id"] for h in ranged]))
         wild, _ = db.search("100%")
         check("LIKE wildcards escaped", wild == [])
+
+        print("\n== search index ==")
+        status = db.index_status()
+        check("index built by first search", status["built"] is True)
+        # Message 6 has neither text nor blob, so there is nothing to index.
+        check("indexes only messages with a body", status["indexed_messages"] == 5,
+              str(status["indexed_messages"]))
+        check("watermark tracks max ROWID", status["watermark"] == 6, str(status["watermark"]))
+        before = db.index_status()["indexed_messages"]
+        report = db.refresh_index()
+        check("re-refresh writes nothing",
+              report["added"] == 0 and report["updated"] == 0
+              and report["removed"] == 0 and not report["rebuilt"],
+              str(report))
+        check("count stable after no-op", db.index_status()["indexed_messages"] == before)
+        rebuilt = db.refresh_index(rebuild=True)
+        check("rebuild re-indexes everything", rebuilt["rebuilt"] and rebuilt["added"] == 5,
+              str(rebuilt))
+
+        # An edit reuses the message's ROWID, so the watermark alone would miss
+        # it; the re-index window is what catches it. Messages stamps
+        # date_edited on a real edit, and the index relies on that to find
+        # changed rows without re-decoding the whole window on every search.
+        edit = sqlite3.connect(path)
+        edit.execute(
+            "UPDATE message SET text = 'Are we still on for brunch?', "
+            "date_edited = ? WHERE ROWID = 1",
+            (apple_ns(datetime(2026, 8, 11, 9, 0, tzinfo=timezone.utc)),),
+        )
+        edit.commit()
+        edit.close()
+        db.close()
+        db = MessagesDB(path, index=SearchIndex(Path(tmp) / "index.db"))
+        edited = db.refresh_index()
+        check("edit detected", edited["updated"] == 1 and edited["added"] == 0, str(edited))
+        check("edited text searchable", len(db.search("brunch")[0]) == 1)
+        check("pre-edit text gone", db.search("still on for dinner")[0] == [])
+
+        # An unsend clears both columns; the stale body must not keep matching.
+        unsend = sqlite3.connect(path)
+        unsend.execute("UPDATE message SET text = NULL, attributedBody = NULL WHERE ROWID = 1")
+        unsend.commit()
+        unsend.close()
+        db.close()
+        db = MessagesDB(path, index=SearchIndex(Path(tmp) / "index.db"))
+        gone = db.refresh_index()
+        check("unsend removes the row", gone["removed"] == 1, str(gone))
+        check("unsent body no longer matches", db.search("brunch")[0] == [])
+
+        print("\n== search: full history (regression) ==")
+        # The bug this guards against: the old implementation's SQL predicate
+        # was `text LIKE ? OR attributedBody IS NOT NULL`, true for nearly
+        # every modern row, so ORDER BY date DESC + LIMIT truncated the scan to
+        # the newest few hundred messages and older matches vanished. Anything
+        # that reintroduces a pre-filter LIMIT will fail here.
+        deep = Path(tmp) / "deep.db"
+        build_deep(deep, filler=3000)
+        deep_db = MessagesDB(deep, index=SearchIndex(Path(tmp) / "deep-index.db"))
+        old_hits, _ = deep_db.search("dentist")
+        check("finds a match buried under 3000 newer messages",
+              len(old_hits) == 1 and old_hits[0]["id"] == 1,
+              f"{[h['id'] for h in old_hits]}")
+        check("still finds recent matches", len(deep_db.search("filler 3000")[0]) == 1)
+        capped, truncated_deep = deep_db.search("filler", limit=25)
+        check("limit respected on a common term", len(capped) == 25, str(len(capped)))
+        check("truncated flag set when more exist", truncated_deep is True)
+        check("newest-first ordering", [h["id"] for h in capped] == sorted(
+            (h["id"] for h in capped), reverse=True))
+        folded, _ = deep_db.search("DENTIST")
+        check("case-insensitive over the index", len(folded) == 1)
+        accented, _ = deep_db.search("CAFÉ")
+        check("case-insensitive for non-ASCII too", len(accented) == 1,
+              f"{[h['id'] for h in accented]}")
+        try:
+            deep_db.search("   ")
+            check("empty query rejected", False)
+        except Exception:
+            check("empty query rejected", True)
+        deep_db.close()
 
         print("\n== get_message ==")
         detail = db.get_message(4)

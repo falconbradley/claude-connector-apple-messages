@@ -13,16 +13,32 @@ if ! command -v mcpb &>/dev/null; then
     npm install -g @anthropic-ai/mcpb
 fi
 
+# Test
+echo ""
+echo "Running tests…"
+python3 "${SCRIPT_DIR}/tests/test_db.py"   | tail -1
+python3 "${SCRIPT_DIR}/tests/test_send.py" | tail -1
+
 # Validate
 echo ""
 echo "Validating manifest…"
 mcpb validate "${SCRIPT_DIR}/manifest.json"
 echo "✓ Manifest valid."
 
+# The version lives in two files and the packer only reads one of them, so a
+# drifted manifest would ship silently mislabelled. Fail instead.
+VERSION=$(grep '^version' "${SCRIPT_DIR}/pyproject.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+MANIFEST_VERSION=$(python3 -c "import json;print(json.load(open('${SCRIPT_DIR}/manifest.json'))['version'])")
+if [[ "${VERSION}" != "${MANIFEST_VERSION}" ]]; then
+    echo "✗ Version mismatch: pyproject.toml is ${VERSION}, manifest.json is ${MANIFEST_VERSION}." >&2
+    echo "  Set both to the same value and re-run." >&2
+    exit 1
+fi
+echo "✓ Version ${VERSION} consistent across pyproject.toml and manifest.json."
+
 # Pack
 echo ""
 mkdir -p "${OUT}"
-VERSION=$(grep '^version' "${SCRIPT_DIR}/pyproject.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
 STABLE="${OUT}/apple-messages.mcpb"
 VERSIONED="${OUT}/apple-messages-${VERSION}.mcpb"
 mcpb pack "${SCRIPT_DIR}" "${STABLE}"
@@ -57,4 +73,8 @@ echo "Both files have the version stamped into Finder Comments (Get Info → Com
 echo ""
 echo "To install: double-click the .mcpb file, or drag it into Claude Desktop."
 echo ""
-echo "ℹ  Mail.app must be running. macOS will prompt for Automation permission on first use."
+echo "ℹ  Full Disk Access is required for reading messages, and it is NOT"
+echo "   promptable: System Settings -> Privacy & Security -> Full Disk Access,"
+echo "   enable Claude, then quit and reopen it."
+echo "ℹ  Sending and contact names also need Automation permission for"
+echo "   Messages, which macOS does prompt for on first use."

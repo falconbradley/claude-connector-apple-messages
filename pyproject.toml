@@ -1,6 +1,6 @@
 [project]
 name = "apple-messages-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for Apple Messages on macOS — read iMessage, SMS, and RCS via chat.db"
 readme = "README.md"
 requires-python = ">=3.11"

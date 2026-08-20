@@ -4,9 +4,9 @@
 
   "name": "apple-messages",
   "display_name": "Apple Messages",
-  "version": "0.1.0",
-  "description": "Read and search iMessage, SMS, and RCS conversations on macOS — messages, chats, attachments, and contact-resolved names.",
-  "long_description": "Connects Claude to Apple Messages on your Mac. Read-only in this release.\n\n**Features:**\n- Search every conversation by text, sender, chat, and date range\n- Read conversations with paging back through history\n- iMessage, SMS, and RCS, including group chats\n- Contact names resolved from your Contacts cards\n- Attachments listed and retrievable\n- Tapbacks, edited messages, and threaded replies surfaced\n\n**Requirements:**\n- macOS 13 Ventura or later (RCS requires macOS 26 or later)\n- **Full Disk Access** for the Claude app — System Settings -> Privacy & Security -> Full Disk Access. Quit and reopen Claude afterwards.\n- Automation permission for Messages (optional; used only to resolve contact names). macOS prompts automatically.\n\n**Why Full Disk Access is required:** unlike the Apple Mail extension, Messages cannot be read through scripting. Its AppleScript dictionary exposes chats and participants but no message class, so message bodies are only available from the Messages database.",
+  "version": "0.2.0",
+  "description": "Read, search, and send iMessage, SMS, and RCS conversations on macOS — messages, chats, attachments, and contact-resolved names.",
+  "long_description": "Connects Claude to Apple Messages on your Mac.\n\n**Features:**\n- Search your whole history by text, sender, chat, and date range\n- Read conversations with paging back through history\n- iMessage, SMS, and RCS, including group chats\n- Contact names resolved from your Contacts cards\n- Attachments listed and retrievable\n- Tapbacks, edited messages, and threaded replies surfaced\n- Compose a message with the text prefilled, and press send yourself\n\n**Requirements:**\n- macOS 13 Ventura or later (RCS requires macOS 26 or later)\n- **Full Disk Access** for the Claude app — System Settings -> Privacy & Security -> Full Disk Access. Quit and reopen Claude afterwards.\n- Automation permission for Messages — needed to resolve contact names and to send. macOS prompts automatically.\n\n**Why Full Disk Access is required:** unlike the Apple Mail extension, Messages cannot be read through scripting. Its AppleScript dictionary exposes chats and participants but no message class, so message bodies are only available from the Messages database.\n\n**Sending:** `compose_message` opens Messages with your text prefilled and stops, so you press send. `send_message` delivers immediately and is deliberately harder to trigger.",
 
   "author": {
     "name": "Brad"
@@ -28,10 +28,13 @@
     { "name": "get_chat_messages", "description": "Read messages from one conversation, oldest-first, with paging back through history" },
     { "name": "search_messages",   "description": "Search message bodies across all conversations, filtered by chat, sender, and date range" },
     { "name": "get_message",       "description": "Read one message in full, including attachments and delivery timestamps" },
-    { "name": "get_attachment",    "description": "Retrieve an attachment's bytes as base64" }
+    { "name": "get_attachment",    "description": "Retrieve an attachment's bytes as base64" },
+    { "name": "refresh_search_index", "description": "Warm or rebuild the local index that makes full-history search possible" },
+    { "name": "compose_message",   "description": "Open Messages with a recipient and text prefilled, without sending — you press send" },
+    { "name": "send_message",      "description": "Send a message to an existing conversation. Delivers immediately and cannot be unsent" }
   ],
 
-  "keywords": ["apple", "messages", "imessage", "sms", "rcs", "macos", "search", "texts", "chat"],
+  "keywords": ["apple", "messages", "imessage", "sms", "rcs", "macos", "search", "texts", "chat", "send"],
   "license": "MIT",
 
   "compatibility": {

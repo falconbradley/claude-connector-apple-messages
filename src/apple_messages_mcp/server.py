@@ -15,14 +15,30 @@ bodies are unreadable through scripting.  Therefore:
   * contact names        -> Messages scripting (needs Automation permission,
     which macOS does prompt for)
 
+Searching
+---------
+Message bodies usually live only in ``attributedBody``, a typedstream blob SQL
+cannot look inside, so searching chat.db directly is either incomplete or very
+slow.  Bodies are therefore decoded once into a local index (see ``index.py``)
+and searched there.
+
+Writing
+-------
+Messages has no draft object, so the write path comes in two levels:
+``compose_message`` prefills a window and lets the user press send, while
+``send_message`` delivers immediately.  Prefer the former.
+
 Tools provided
 --------------
-  get_stats           - Totals, per-service breakdown, date range
-  list_chats          - Conversations, most-recently-active first
-  get_chat_messages   - Messages in one conversation, oldest-first, paginated
-  search_messages     - Substring search with chat/sender/date filters
-  get_message         - One message with attachments and delivery timestamps
-  get_attachment      - Attachment bytes as base64
+  get_stats             - Totals, per-service breakdown, date range
+  list_chats            - Conversations, most-recently-active first
+  get_chat_messages     - Messages in one conversation, oldest-first, paginated
+  search_messages       - Substring search with chat/sender/date filters
+  get_message           - One message with attachments and delivery timestamps
+  get_attachment        - Attachment bytes as base64
+  refresh_search_index  - Warm or rebuild the search index
+  compose_message       - Open Messages with text prefilled, without sending
+  send_message          - Send to an existing conversation (irreversible)
 """
 
 from __future__ import annotations
@@ -43,11 +59,15 @@ from .db import MessagesDB, MessagesDBError
 from .models import (
     AttachmentData,
     ChatSummary,
+    ComposeResult,
     MessageDetail,
     MessagesStats,
     MessageSummary,
+    SearchIndexStatus,
     SearchResult,
+    SendResult,
 )
+from .send import SendError, compose as compose_window, send_to_chat
 
 logging.basicConfig(
     level=logging.INFO,
@@ -145,7 +165,11 @@ def search_messages(
     after: Optional[datetime] = None,
     before: Optional[datetime] = None,
 ) -> SearchResult:
-    """Search message bodies across every conversation.
+    """Search message bodies across every conversation, over all history.
+
+    Backed by a local index of decoded message bodies, which is brought up to
+    date automatically. The first search on a large history has to build that
+    index and may take a while; later searches are fast.
 
     Args:
         query: Text to look for (case-insensitive substring match).
@@ -235,6 +259,99 @@ def get_attachment(attachment_id: int) -> AttachmentData:
         mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
         size=size,
         data_base64=base64.b64encode(data).decode("ascii"),
+    )
+
+
+@mcp.tool()
+def refresh_search_index(rebuild: bool = False) -> SearchIndexStatus:
+    """Update the local search index, and report on it.
+
+    `search_messages` keeps this current on its own, so calling this is
+    optional. It is useful for warming the index deliberately — the first
+    build on a large history decodes every message and takes a while — and for
+    forcing a full rebuild.
+
+    Args:
+        rebuild: Discard the index and decode every message again. Needed only
+            to pick up edits to messages older than the recent-edit window.
+    """
+    db = _get_db()
+    try:
+        report = db.refresh_index(rebuild=rebuild)
+        status = db.index_status()
+    except MessagesDBError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return SearchIndexStatus(**{**status, **report})
+
+
+@mcp.tool()
+def compose_message(
+    handle: str, body: str = "", service: str = "imessage"
+) -> ComposeResult:
+    """Open Messages with a recipient and text prefilled, WITHOUT sending.
+
+    This is the safe way to write a message: it puts the text in front of the
+    user in Messages and stops, so they read it and press send themselves.
+    Prefer it over `send_message`, and use it whenever the conversation does
+    not exist yet — `send_message` can only reply to an existing one.
+
+    Args:
+        handle: Recipient phone number or email, e.g. "+15551234567".
+        body: Text to prefill. May be empty to just open the conversation.
+        service: "imessage" or "sms" — which transport Messages preselects.
+    """
+    try:
+        result = compose_window(handle, body, service)
+    except SendError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return ComposeResult(**result.as_dict())
+
+
+@mcp.tool()
+def send_message(chat_id: int, body: str, confirm: bool = False) -> SendResult:
+    """Send a message to an existing conversation. This delivers immediately.
+
+    IRREVERSIBLE — the message goes out as soon as this runs, and scripting
+    cannot unsend it. Confirm the exact recipient and wording with the user
+    before calling, and pass confirm=True to acknowledge that. If they have
+    not clearly asked for it to be sent, use `compose_message` instead and let
+    them press send.
+
+    Messages picks the transport (iMessage, SMS, or RCS) for the conversation
+    itself, which is why this addresses a chat rather than a raw handle. To
+    start a new conversation, use `compose_message`.
+
+    Args:
+        chat_id: Conversation id from `list_chats`.
+        body: Text to send.
+        confirm: Must be True. A guard against sending by accident.
+    """
+    if not confirm:
+        raise ValueError(
+            "send_message requires confirm=True. Show the user the exact "
+            "recipient and message text and get their agreement first, or use "
+            "compose_message to let them press send themselves."
+        )
+
+    db = _get_db()
+    try:
+        guid = db.chat_guid(chat_id)
+    except MessagesDBError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not guid:
+        raise ValueError(f"No conversation with id {chat_id}. Try list_chats.")
+
+    try:
+        result = send_to_chat(guid, body)
+    except SendError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    return SendResult(
+        sent=True,
+        chat_id=chat_id,
+        chat_guid=guid,
+        body=result["body"],
+        characters=result["characters"],
     )
 
 

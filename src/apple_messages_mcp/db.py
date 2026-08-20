@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from .index import SearchIndex, SearchIndexError
 from .typedstream import OBJECT_REPLACEMENT, message_text
 
 logger = logging.getLogger("apple_messages_mcp.db")
@@ -63,10 +64,16 @@ def _is_permission_error(exc: BaseException) -> bool:
 class MessagesDB:
     """Thin read-only wrapper around chat.db."""
 
-    def __init__(self, path: Path | str = DEFAULT_DB_PATH) -> None:
+    def __init__(
+        self,
+        path: Path | str = DEFAULT_DB_PATH,
+        index: Optional[SearchIndex] = None,
+    ) -> None:
         self.path = Path(path).expanduser()
         self._conn: Optional[sqlite3.Connection] = None
         self._snapshot_dir: Optional[str] = None
+        self.index = index if index is not None else SearchIndex()
+        self._index_attached = False
 
     # -- connection ------------------------------------------------------
 
@@ -129,9 +136,51 @@ class MessagesDB:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+        self._index_attached = False
         if self._snapshot_dir:
             shutil.rmtree(self._snapshot_dir, ignore_errors=True)
             self._snapshot_dir = None
+
+    # -- search index ----------------------------------------------------
+
+    def refresh_index(self, rebuild: bool = False) -> dict[str, Any]:
+        """Bring the search mirror up to date with this database.
+
+        Cheap once warm: only rows newer than the mirror's watermark, plus any
+        recently edited or unsent ones, are decoded.  The first call on a large
+        history decodes everything and can take a while.
+
+        Index failures are re-raised as :class:`MessagesDBError` so callers
+        have a single error type to handle.
+        """
+        try:
+            return self.index.refresh(self.connect(), rebuild=rebuild).as_dict()
+        except SearchIndexError as exc:
+            raise MessagesDBError(str(exc)) from exc
+
+    def index_status(self) -> dict[str, Any]:
+        try:
+            return self.index.status()
+        except SearchIndexError as exc:
+            raise MessagesDBError(str(exc)) from exc
+
+    def _attach_index(self) -> None:
+        """ATTACH the mirror read-only so searches can join against it.
+
+        Attaching keeps the match in SQL, which is what makes the filters,
+        the ordering and the LIMIT apply to the whole history instead of to
+        whatever subset a Python-side filter happened to see.
+        """
+        if self._index_attached:
+            return
+        conn = self.connect()
+        try:
+            conn.execute("ATTACH DATABASE ? AS idx", (self.index.attach_uri(),))
+        except sqlite3.Error as exc:
+            raise MessagesDBError(
+                f"Could not attach the search index at {self.index.path}: {exc}"
+            ) from exc
+        self._index_attached = True
 
     def _query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         conn = self.connect()
@@ -277,6 +326,17 @@ class MessagesDB:
             )
         return chats
 
+    def chat_guid(self, chat_id: int) -> Optional[str]:
+        """The GUID for a chat id, or None if there is no such chat.
+
+        Sending addresses a conversation by GUID, so this is the bridge from
+        the numeric ids the read tools hand out to something ``send`` accepts.
+        """
+        rows = self._query(
+            "SELECT guid FROM chat WHERE ROWID = ? LIMIT 1", (chat_id,)
+        )
+        return rows[0]["guid"] if rows else None
+
     def chat_participants(self, chat_id: int) -> list[str]:
         return [
             row["id"]
@@ -356,14 +416,24 @@ class MessagesDB:
         after: Optional[datetime] = None,
         before: Optional[datetime] = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Substring search over message bodies.
+        """Case-insensitive substring search over decoded message bodies.
 
-        chat.db ships no FTS index, so this is a ``LIKE`` scan.  Rows whose body
-        lives only in ``attributedBody`` are invisible to SQL, so we over-fetch
-        and re-filter in Python against the decoded text.
+        The match runs against the casefolded mirror maintained by
+        :mod:`.index`, not against chat.db's own columns.  See that module for
+        why: most bodies live only in ``attributedBody``, where SQL cannot see
+        them, so matching in chat.db is either incomplete or ruinously slow.
+
+        Because the mirror holds plain text, the whole query — filters,
+        ordering and ``LIMIT`` — happens in SQL over the complete history.
         """
-        where = ["(m.text LIKE ? ESCAPE '\\' OR m.attributedBody IS NOT NULL)"]
-        params: list[Any] = [f"%{_escape_like(query)}%"]
+        if not query or not query.strip():
+            raise MessagesDBError("Search query cannot be empty.")
+
+        self.refresh_index()
+        self._attach_index()
+
+        where = ["b.folded LIKE ? ESCAPE '\\'"]
+        params: list[Any] = [f"%{_escape_like(query.casefold())}%"]
 
         if chat_id is not None:
             where.append("cmj.chat_id = ?")
@@ -378,19 +448,19 @@ class MessagesDB:
             where.append("m.date <= ?")
             params.append(_to_apple_ns(before))
 
-        # Over-fetch so the Python-side filter still has enough to fill `limit`.
-        scan_limit = max(limit * 20, 500)
-        params.append(scan_limit)
+        # One extra row tells us whether more matches existed past the limit.
+        params.append(limit + 1)
 
         rows = self._query(
             f"""
             SELECT {self._MESSAGE_COLUMNS},
                    c.ROWID AS chat_id,
                    COALESCE(c.display_name, c.chat_identifier) AS chat_name
-            FROM message m
-            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-            JOIN chat c                ON c.ROWID = cmj.chat_id
-            LEFT JOIN handle h         ON h.ROWID = m.handle_id
+            FROM idx.body b
+            JOIN message m              ON m.ROWID = b.message_id
+            JOIN chat_message_join cmj  ON cmj.message_id = m.ROWID
+            JOIN chat c                 ON c.ROWID = cmj.chat_id
+            LEFT JOIN handle h          ON h.ROWID = m.handle_id
             WHERE {' AND '.join(where)}
             ORDER BY m.date DESC
             LIMIT ?
@@ -398,17 +468,8 @@ class MessagesDB:
             params,
         )
 
-        needle = query.casefold()
-        matches: list[dict[str, Any]] = []
-        for row in rows:
-            summary = self._to_summary(row)
-            if summary["text"] and needle in summary["text"].casefold():
-                matches.append(summary)
-                if len(matches) > limit:
-                    break
-
-        truncated = len(matches) > limit or len(rows) >= scan_limit
-        return matches[:limit], truncated
+        truncated = len(rows) > limit
+        return [self._to_summary(row) for row in rows[:limit]], truncated
 
     def get_message(self, message_id: int) -> Optional[dict[str, Any]]:
         rows = self._query(

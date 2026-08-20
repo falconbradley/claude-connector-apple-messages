@@ -71,6 +71,47 @@ class SearchResult(BaseModel):
     messages: list[MessageSummary] = []
 
 
+class ComposeResult(BaseModel):
+    """A compose window was opened; nothing was sent."""
+
+    opened: bool = True
+    sent: bool = False               # always False — a human presses send
+    handle: str
+    service: str                     # "imessage" | "sms"
+    body: str = ""
+    url: str                         # the URL scheme link that was opened
+    note: str = ""
+
+
+class SendResult(BaseModel):
+    """A message was actually delivered."""
+
+    sent: bool = True
+    chat_id: int
+    chat_guid: str
+    chat_name: Optional[str] = None
+    body: str
+    characters: int = 0
+
+
+class SearchIndexStatus(BaseModel):
+    """State of the local search mirror (see index.py)."""
+
+    built: bool = False
+    indexed_messages: int = 0
+    watermark: int = 0               # highest message ROWID indexed
+    built_at: Optional[str] = None
+    index_bytes: int = 0
+    path: str = ""
+    # Populated only by refresh_search_index, not by a plain status read.
+    scanned: Optional[int] = None
+    added: Optional[int] = None      # message ids not previously indexed
+    updated: Optional[int] = None    # bodies that had changed (an edit)
+    removed: Optional[int] = None    # bodies that went away (an unsend)
+    rebuilt: Optional[bool] = None
+    seconds: Optional[float] = None
+
+
 class MessagesStats(BaseModel):
     total_messages: int
     total_chats: int

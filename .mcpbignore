@@ -32,5 +32,8 @@ kangentic.json
 # Old install script (replaced by mcpb install flow)
 install.sh
 
-# Dev harness — runs MailBridge directly without MCPB rebuild; not shipped.
+# Dev-only: schema probe against the real chat.db. Not part of the extension.
 tools/
+
+# Dev-only: synthetic-database test suites.
+tests/
