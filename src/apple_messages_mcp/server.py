@@ -52,7 +52,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+# The ergonomic server class was renamed in MCP SDK 2.0: ``mcp.server.fastmcp``
+# went away and ``FastMCP`` became ``mcp.server.mcpserver.MCPServer``. The
+# constructor, ``.tool()`` and ``.run()`` are unchanged, so accept either — the
+# dependency floor is old enough that both are in range for a fresh resolve.
+try:
+    from mcp.server.mcpserver import MCPServer as _Server  # MCP SDK >= 2.0
+except ImportError:  # pragma: no cover - depends on the resolved SDK version
+    from mcp.server.fastmcp import FastMCP as _Server  # MCP SDK < 2.0
 
 from .applescript import ContactResolver
 from .db import MessagesDB, MessagesDBError
@@ -76,7 +83,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("apple_messages_mcp")
 
-mcp = FastMCP("apple-messages")
+mcp = _Server("apple-messages")
 
 # Lazily initialised: opening chat.db (and especially the contact scan) is slow
 # enough that doing it at import time would stall the MCP initialize response.

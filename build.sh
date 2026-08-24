@@ -34,7 +34,13 @@ if [[ "${VERSION}" != "${MANIFEST_VERSION}" ]]; then
     echo "  Set both to the same value and re-run." >&2
     exit 1
 fi
-echo "✓ Version ${VERSION} consistent across pyproject.toml and manifest.json."
+INIT_VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "${SCRIPT_DIR}/src/apple_messages_mcp/__init__.py")
+if [[ "${VERSION}" != "${INIT_VERSION}" ]]; then
+    echo "✗ Version mismatch: pyproject.toml is ${VERSION}, __init__.py is ${INIT_VERSION}." >&2
+    echo "  Set both to the same value and re-run." >&2
+    exit 1
+fi
+echo "✓ Version ${VERSION} consistent across pyproject.toml, manifest.json, and __init__.py."
 
 # Pack
 echo ""
