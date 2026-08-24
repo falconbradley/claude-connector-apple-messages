@@ -140,6 +140,10 @@ class SearchIndex:
         # The mirror is disposable, so durability is not worth the fsyncs.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=OFF")
+        # Writers are opened per call and tool calls arrive on a pool of worker
+        # threads, so two refreshes can overlap. Wait for the other one to
+        # finish rather than failing the search outright.
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_SCHEMA)
         return conn
 

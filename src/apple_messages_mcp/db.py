@@ -20,6 +20,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -61,8 +62,32 @@ def _is_permission_error(exc: BaseException) -> bool:
     return "authorization denied" in text or "unable to open database" in text
 
 
+class _ConnectionState(threading.local):
+    """Per-thread connection state.
+
+    ``sqlite3`` refuses to let a Connection be used from any thread other than
+    the one that created it, and the MCP runtime hands each synchronous tool
+    call to an arbitrary worker from a rotating thread pool. A single cached
+    connection therefore works right up until the pool moves to a different
+    worker, and then fails permanently — including for callers that had been
+    succeeding moments earlier.
+
+    Subclassing ``threading.local`` runs ``__init__`` once per thread, so every
+    worker starts with its own empty slots and opens its own connection.
+    """
+
+    def __init__(self) -> None:
+        self.conn: Optional[sqlite3.Connection] = None
+        self.index_attached = False
+
+
 class MessagesDB:
-    """Thin read-only wrapper around chat.db."""
+    """Thin read-only wrapper around chat.db.
+
+    Safe to share across threads: each thread transparently gets its own
+    connection. The snapshot fallback, being expensive, is still made once and
+    shared.
+    """
 
     def __init__(
         self,
@@ -70,16 +95,19 @@ class MessagesDB:
         index: Optional[SearchIndex] = None,
     ) -> None:
         self.path = Path(path).expanduser()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._state = _ConnectionState()
         self._snapshot_dir: Optional[str] = None
         self.index = index if index is not None else SearchIndex()
-        self._index_attached = False
+        # Guards the one-time snapshot and the open-connection registry, both
+        # of which are shared by every thread.
+        self._lock = threading.Lock()
+        self._open_conns: list[sqlite3.Connection] = []
 
     # -- connection ------------------------------------------------------
 
     def connect(self) -> sqlite3.Connection:
-        if self._conn is not None:
-            return self._conn
+        if self._state.conn is not None:
+            return self._state.conn
 
         if not self.path.exists():
             raise MessagesDBError(
@@ -99,23 +127,39 @@ class MessagesDB:
             conn = self._connect_snapshot()
 
         conn.row_factory = sqlite3.Row
-        self._conn = conn
+        self._state.conn = conn
+        with self._lock:
+            self._open_conns.append(conn)
         return conn
 
     def _connect_snapshot(self) -> sqlite3.Connection:
-        """Copy the database (and its WAL sidecars) somewhere we can read."""
-        self._snapshot_dir = tempfile.mkdtemp(prefix="apple-messages-mcp-")
-        target = Path(self._snapshot_dir) / "chat.db"
-        try:
-            shutil.copy2(self.path, target)
-            for suffix in ("-wal", "-shm"):
-                sidecar = self.path.with_name(self.path.name + suffix)
-                if sidecar.exists():
-                    shutil.copy2(sidecar, target.with_name(target.name + suffix))
-        except OSError as exc:
-            if _is_permission_error(exc) or isinstance(exc, PermissionError):
-                raise MessagesDBError(self._permission_help()) from exc
-            raise MessagesDBError(f"Could not snapshot chat.db: {exc}") from exc
+        """Copy the database (and its WAL sidecars) somewhere we can read.
+
+        The copy is made once and every thread then opens its own connection
+        against it — chat.db can be gigabytes, so snapshotting per thread would
+        be ruinous.
+        """
+        with self._lock:
+            if self._snapshot_dir is None:
+                snapshot_dir = tempfile.mkdtemp(prefix="apple-messages-mcp-")
+                target = Path(snapshot_dir) / "chat.db"
+                try:
+                    shutil.copy2(self.path, target)
+                    for suffix in ("-wal", "-shm"):
+                        sidecar = self.path.with_name(self.path.name + suffix)
+                        if sidecar.exists():
+                            shutil.copy2(
+                                sidecar, target.with_name(target.name + suffix)
+                            )
+                except OSError as exc:
+                    shutil.rmtree(snapshot_dir, ignore_errors=True)
+                    if _is_permission_error(exc) or isinstance(exc, PermissionError):
+                        raise MessagesDBError(self._permission_help()) from exc
+                    raise MessagesDBError(
+                        f"Could not snapshot chat.db: {exc}"
+                    ) from exc
+                self._snapshot_dir = snapshot_dir
+            target = Path(self._snapshot_dir) / "chat.db"
 
         return sqlite3.connect(f"file:{target}?mode=ro", uri=True)
 
@@ -133,10 +177,18 @@ class MessagesDB:
         )
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-        self._index_attached = False
+        with self._lock:
+            conns, self._open_conns = self._open_conns, []
+        for conn in conns:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                # Closing is itself thread-affine, so a connection belonging to
+                # another worker cannot be closed from here. Dropping the last
+                # reference lets its owning thread finalise it.
+                pass
+        self._state.conn = None
+        self._state.index_attached = False
         if self._snapshot_dir:
             shutil.rmtree(self._snapshot_dir, ignore_errors=True)
             self._snapshot_dir = None
@@ -171,7 +223,7 @@ class MessagesDB:
         the ordering and the LIMIT apply to the whole history instead of to
         whatever subset a Python-side filter happened to see.
         """
-        if self._index_attached:
+        if self._state.index_attached:
             return
         conn = self.connect()
         try:
@@ -180,7 +232,7 @@ class MessagesDB:
             raise MessagesDBError(
                 f"Could not attach the search index at {self.index.path}: {exc}"
             ) from exc
-        self._index_attached = True
+        self._state.index_attached = True
 
     def _query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         conn = self.connect()
@@ -418,6 +470,9 @@ class MessagesDB:
     ) -> tuple[list[dict[str, Any]], bool]:
         """Case-insensitive substring search over decoded message bodies.
 
+        ``query`` may be blank, in which case only the filters apply and the
+        most recent matching messages come back newest-first.
+
         The match runs against the casefolded mirror maintained by
         :mod:`.index`, not against chat.db's own columns.  See that module for
         why: most bodies live only in ``attributedBody``, where SQL cannot see
@@ -426,14 +481,16 @@ class MessagesDB:
         Because the mirror holds plain text, the whole query — filters,
         ordering and ``LIMIT`` — happens in SQL over the complete history.
         """
-        if not query or not query.strip():
-            raise MessagesDBError("Search query cannot be empty.")
-
         self.refresh_index()
         self._attach_index()
 
-        where = ["b.folded LIKE ? ESCAPE '\\'"]
-        params: list[Any] = [f"%{_escape_like(query.casefold())}%"]
+        # A blank query means "no text predicate" — filtering by chat and date
+        # with no search term is the natural way to read one conversation.
+        where: list[str] = []
+        params: list[Any] = []
+        if query and query.strip():
+            where.append("b.folded LIKE ? ESCAPE '\\'")
+            params.append(f"%{_escape_like(query.casefold())}%")
 
         if chat_id is not None:
             where.append("cmj.chat_id = ?")
@@ -461,7 +518,7 @@ class MessagesDB:
             JOIN chat_message_join cmj  ON cmj.message_id = m.ROWID
             JOIN chat c                 ON c.ROWID = cmj.chat_id
             LEFT JOIN handle h          ON h.ROWID = m.handle_id
-            WHERE {' AND '.join(where)}
+            WHERE {' AND '.join(where) if where else '1'}
             ORDER BY m.date DESC
             LIMIT ?
             """,

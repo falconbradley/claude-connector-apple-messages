@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -292,11 +293,9 @@ def main() -> int:
         accented, _ = deep_db.search("CAFÉ")
         check("case-insensitive for non-ASCII too", len(accented) == 1,
               f"{[h['id'] for h in accented]}")
-        try:
-            deep_db.search("   ")
-            check("empty query rejected", False)
-        except Exception:
-            check("empty query rejected", True)
+        blank, _ = deep_db.search("   ", limit=5)
+        check("blank query is a filter-only search, not an error", len(blank) == 5,
+              f"{len(blank)} rows")
         deep_db.close()
 
         print("\n== get_message ==")
@@ -317,6 +316,64 @@ def main() -> int:
               str(db.to_datetime(legacy)))
         check("null timestamp safe", db.to_datetime(None) is None)
 
+        print("\n== filter-only search ==")
+        # `query` is optional: filtering by chat and date with no search term is
+        # the natural way to read one conversation.
+        all_hits, _ = db.search("")
+        check("blank query returns everything indexed", len(all_hits) > 0,
+              f"{len(all_hits)} rows")
+        chat_only, _ = db.search("", chat_id=2)
+        check("blank query honours chat_id",
+              len(chat_only) > 0 and all(h["chat_id"] == 2 for h in chat_only),
+              f"{[(h['id'], h['chat_id']) for h in chat_only]}")
+        sent_only, _ = db.search("", from_me=True)
+        check("blank query honours from_me", all(h["is_from_me"] for h in sent_only))
+        whitespace, _ = db.search("   ")
+        check("whitespace query treated as blank", len(whitespace) == len(all_hits))
+
+        db.close()
+
+    print("\n== connections are thread-affine ==")
+    # Regression test for the progressive failure: sqlite3 forbids using a
+    # connection off its creating thread, and the MCP runtime dispatches tool
+    # calls onto a rotating worker pool. One or two calls prove nothing — the
+    # bug only appears once the pool has moved to a different worker, so drive
+    # several distinct threads and make every one of them query.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chat.db"
+        build(path)
+        db = MessagesDB(path, index=SearchIndex(Path(tmp) / "index.db"))
+
+        db.list_chats()  # bind the first connection to *this* thread
+
+        results: dict[str, object] = {}
+        errors: list[str] = []
+
+        def hammer(name: str) -> None:
+            try:
+                results[name] = (
+                    len(db.list_chats()),
+                    len(db.chat_messages(1)),
+                    len(db.search("dinner")[0]),
+                    db.stats()["total_messages"],
+                )
+            except Exception as exc:  # noqa: BLE001 - the point is to report it
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
+        workers = [threading.Thread(target=hammer, args=(f"w{i}",)) for i in range(4)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+        check("no cross-thread failures", not errors, "; ".join(errors))
+        check("every worker thread got results", len(results) == 4,
+              f"{sorted(results)}")
+        check("all workers agree with each other", len(set(results.values())) <= 1,
+              f"{results}")
+
+        # And the original thread still works after the others have run.
+        check("creating thread still usable", len(db.list_chats()) > 0)
         db.close()
 
     failed = [label for label, ok in CHECKS if not ok]

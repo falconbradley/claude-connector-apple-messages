@@ -165,7 +165,7 @@ def get_chat_messages(
 
 @mcp.tool()
 def search_messages(
-    query: str,
+    query: str = "",
     limit: int = 30,
     chat_id: Optional[int] = None,
     from_me: Optional[bool] = None,
@@ -179,7 +179,9 @@ def search_messages(
     index and may take a while; later searches are fast.
 
     Args:
-        query: Text to look for (case-insensitive substring match).
+        query: Text to look for (case-insensitive substring match). Leave it
+            out to search on the filters alone — `chat_id` plus a date range
+            with no search term reads one conversation newest-first.
         limit: Maximum messages to return (default 30).
         chat_id: Restrict to one conversation from `list_chats`.
         from_me: True for only messages you sent, False for only received.

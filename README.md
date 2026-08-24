@@ -19,7 +19,7 @@ Apple has broken `send` before, so treat the first real send as a test. See
 | `get_stats` | Totals, unread count, per-service breakdown (iMessage/SMS/RCS), date range |
 | `list_chats` | Conversations, most recently active first, with participants and a preview |
 | `get_chat_messages` | Messages in one conversation, oldest-first, paged |
-| `search_messages` | Substring search over all history, filtered by chat, sender, and date range |
+| `search_messages` | Substring search over all history, filtered by chat, sender, and date range. The search term is optional — pass filters alone to read a conversation |
 | `get_message` | One message in full, with attachments and delivery timestamps |
 | `get_attachment` | Attachment bytes, base64-encoded |
 | `refresh_search_index` | Warm or rebuild the local search index |
