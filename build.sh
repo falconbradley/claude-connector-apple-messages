@@ -18,6 +18,9 @@ echo ""
 echo "Running tests…"
 python3 "${SCRIPT_DIR}/tests/test_db.py"   | tail -1
 python3 "${SCRIPT_DIR}/tests/test_send.py" | tail -1
+# The preview test drives the real server over the MCP SDK, so it needs the
+# project environment rather than whatever python3 is on PATH.
+uv run --project "${SCRIPT_DIR}" python "${SCRIPT_DIR}/tests/test_preview.py" | tail -1
 
 # Validate
 echo ""

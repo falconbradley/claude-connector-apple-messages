@@ -17,14 +17,57 @@ Apple has broken `send` before, so treat the first real send as a test. See
 | Tool | Description |
 | --- | --- |
 | `get_stats` | Totals, unread count, per-service breakdown (iMessage/SMS/RCS), date range |
-| `list_chats` | Conversations, most recently active first, with participants and a preview |
-| `get_chat_messages` | Messages in one conversation, oldest-first, paged |
-| `search_messages` | Substring search over all history, filtered by chat, sender, and date range. The search term is optional — pass filters alone to read a conversation |
-| `get_message` | One message in full, with attachments and delivery timestamps |
+| `list_chats` | Conversations, most recently active first, with participants and a preview. Renders as a card |
+| `get_chat_messages` | Messages in one conversation, oldest-first, paged. Renders as a bubble transcript |
+| `search_messages` | Substring search over all history, filtered by chat, sender, and date range. The search term is optional — pass filters alone to read a conversation. Renders as a card |
+| `get_message` | One message in full, with attachments and delivery timestamps. Renders as a card |
 | `get_attachment` | Attachment bytes, base64-encoded |
 | `refresh_search_index` | Warm or rebuild the local search index |
 | `compose_message` | Open Messages with text prefilled — **you** press send |
 | `send_message` | Send to an existing conversation; delivers immediately |
+
+## Previews in the chat
+
+The four read tools render an inline card in the transcript, the way the Gmail
+and Superhuman connectors show an email instead of a wall of JSON:
+
+| Tool | Card |
+| --- | --- |
+| `list_chats` | A conversation list like the Messages sidebar — avatar, name, last-message preview, relative date, a green dot for SMS/RCS |
+| `get_chat_messages` | An iMessage-style transcript — blue/green bubbles for you, grey for them, day separators, sender names in groups, tapbacks, attachments, edited and unsent markers |
+| `search_messages` | Hit rows across conversations with the match highlighted; scoped to one `chat_id`, a transcript instead |
+| `get_message` | One bubble plus delivery details and the attachment list |
+
+This is [MCP Apps](https://modelcontextprotocol.io/specification/draft/extensions/apps)
+(`io.modelcontextprotocol/ui`), built the same way as the Apple Mail
+connector's `preview_email` so the two cards read as one family: the same host
+tokens and fallback palette, the same header/footer chrome, avatar colours and
+date formatting, the same handshake. Each of those tools carries
+`_meta.ui.resourceUri` (and the pre-GA flat `_meta["ui/resourceUri"]`, which
+some hosts still read) pointing at `ui://apple-messages/message-preview`, a
+single self-contained HTML document the server serves as
+`text/html;profile=mcp-app`. Claude Desktop renders it in a sandboxed iframe
+and streams the tool call's arguments and result to it over `postMessage`
+(`ui/initialize`, `ui/notifications/tool-input`, `ui/notifications/tool-result`).
+The document reads the host's theme and CSS variables so it matches light and
+dark mode, reports its own height so the card fits its content, and collapses
+long transcripts behind a *Show all* button.
+
+Nothing about the tool results changed: a host without Apps support ignores
+the metadata and sees the same JSON as before, which is also what the model
+reads. One document serves all four tools — it picks a view from the tool name
+the host reports, falling back to the shape of the structured result.
+
+The document lives at `src/apple_messages_mcp/ui/message_preview.html`, with
+the Messages icon inlined as a data URI at load time (the sandbox blocks
+outside fetches, so the page must be self-contained). Like the Mail card it
+draws its own border (`prefersBorder: false`) and declares no CSP allowances,
+so the host runs it under the strictest default: no network, no nested frames.
+
+The "Widget from Apple Messages" label above the card is the host's own chrome
+for MCP Apps, not something the connector controls. `tests/test_preview.py` drives
+the real server over the SDK's in-memory transport and checks the tool
+metadata, the resource, and the result shapes the card dispatches on.
 
 ## Requirements
 
@@ -180,6 +223,7 @@ it is in reach.
 ```bash
 python3 tests/test_db.py       # SQL, decoder, and search-index tests
 python3 tests/test_send.py     # compose URLs, send guards, argv safety
+uv run python tests/test_preview.py   # MCP Apps preview: tool metadata, resource, result shapes
 python3 tools/probe_schema.py  # verify the real chat.db (needs Full Disk Access)
 ./build.sh                     # test, validate manifest, pack the .mcpb
 ```
@@ -193,7 +237,12 @@ truncated-search bug described above.
 builder, the guard clauses, and the exact `osascript` argv — so it is safe
 anywhere, and correspondingly cannot tell you whether Apple's `send` works.
 
-Neither suite touches the real search index; both inject a temporary one.
+`tests/test_preview.py` runs the server in-process through the MCP SDK's
+in-memory transport (so it needs the project environment, hence `uv run`),
+against the same synthetic database, with a stub in place of the contact
+resolver so it never scripts Messages.app.
+
+None of the suites touch the real search index; each injects a temporary one.
 
 ## License
 

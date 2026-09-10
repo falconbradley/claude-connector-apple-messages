@@ -1,7 +1,7 @@
 """
 Apple Messages MCP Server
 =========================
-Read-only access to iMessage, SMS, and RCS conversations on macOS.
+Read, search, and send iMessage, SMS, and RCS conversations on macOS.
 
 Architecture
 ------------
@@ -22,6 +22,14 @@ cannot look inside, so searching chat.db directly is either incomplete or very
 slow.  Bodies are therefore decoded once into a local index (see ``index.py``)
 and searched there.
 
+Previews
+--------
+The read tools carry an MCP Apps UI resource (see ``preview.py``), so a host
+that supports Apps — Claude Desktop does — renders their results as an inline
+card in the transcript: a bubble transcript, a hit list, or a conversation
+list, the way the Gmail connector shows an email card.  The tool result itself
+is unchanged, so hosts without Apps see exactly what they saw before.
+
 Writing
 -------
 Messages has no draft object, so the write path comes in two levels:
@@ -31,10 +39,10 @@ Messages has no draft object, so the write path comes in two levels:
 Tools provided
 --------------
   get_stats             - Totals, per-service breakdown, date range
-  list_chats            - Conversations, most-recently-active first
-  get_chat_messages     - Messages in one conversation, oldest-first, paginated
-  search_messages       - Substring search with chat/sender/date filters
-  get_message           - One message with attachments and delivery timestamps
+  list_chats            - Conversations, most-recently-active first   [preview]
+  get_chat_messages     - Messages in one conversation, oldest-first  [preview]
+  search_messages       - Substring search with chat/sender/date filters [preview]
+  get_message           - One message with attachments and delivery timestamps [preview]
   get_attachment        - Attachment bytes as base64
   refresh_search_index  - Warm or rebuild the search index
   compose_message       - Open Messages with text prefilled, without sending
@@ -52,14 +60,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# The ergonomic server class was renamed in MCP SDK 2.0: ``mcp.server.fastmcp``
-# went away and ``FastMCP`` became ``mcp.server.mcpserver.MCPServer``. The
-# constructor, ``.tool()`` and ``.run()`` are unchanged, so accept either — the
-# dependency floor is old enough that both are in range for a fresh resolve.
-try:
-    from mcp.server.mcpserver import MCPServer as _Server  # MCP SDK >= 2.0
-except ImportError:  # pragma: no cover - depends on the resolved SDK version
-    from mcp.server.fastmcp import FastMCP as _Server  # MCP SDK < 2.0
+from mcp.server.mcpserver import MCPServer
 
 from .applescript import ContactResolver
 from .db import MessagesDB, MessagesDBError
@@ -74,6 +75,7 @@ from .models import (
     SearchResult,
     SendResult,
 )
+from .preview import LEGACY_UI_META, PREVIEW_URI, build_apps
 from .send import SendError, compose as compose_window, send_to_chat
 
 logging.basicConfig(
@@ -83,7 +85,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("apple_messages_mcp")
 
-mcp = _Server("apple-messages")
+# Tools that render a preview card register through the Apps extension, which
+# stamps ``_meta.ui.resourceUri`` on them (plus the legacy flat key, for hosts
+# that still read only that).  The server consumes the extension
+# when it is constructed, so it is built at the bottom of this module, after
+# every tool function exists.
+apps = build_apps()
 
 # Lazily initialised: opening chat.db (and especially the contact scan) is slow
 # enough that doing it at import time would stall the MCP initialize response.
@@ -111,7 +118,6 @@ def _summary(row: dict, resolver: ContactResolver) -> MessageSummary:
     return MessageSummary(**row, sender_name=resolver.name_for(row.get("sender")))
 
 
-@mcp.tool()
 def get_stats() -> MessagesStats:
     """Overview of the Messages database: message and chat totals, unread
     count, attachment count, a per-service breakdown (iMessage / SMS / RCS),
@@ -122,9 +128,13 @@ def get_stats() -> MessagesStats:
         raise RuntimeError(str(exc)) from exc
 
 
-@mcp.tool()
+@apps.tool(resource_uri=PREVIEW_URI, meta=LEGACY_UI_META)
 def list_chats(limit: int = 30, offset: int = 0) -> list[ChatSummary]:
     """List conversations, most recently active first.
+
+    In Claude the result renders as an inline card, so don't repeat its
+    contents in your reply — a one-line summary or the answer to the
+    user's question is enough.
 
     Args:
         limit: Maximum conversations to return (default 30).
@@ -142,11 +152,15 @@ def list_chats(limit: int = 30, offset: int = 0) -> list[ChatSummary]:
     ]
 
 
-@mcp.tool()
+@apps.tool(resource_uri=PREVIEW_URI, meta=LEGACY_UI_META)
 def get_chat_messages(
     chat_id: int, limit: int = 50, before_id: Optional[int] = None
 ) -> list[MessageSummary]:
     """Read messages from one conversation, returned oldest-first.
+
+    In Claude the result renders as an inline card, so don't repeat its
+    contents in your reply — a one-line summary or the answer to the
+    user's question is enough.
 
     Args:
         chat_id: Conversation id from `list_chats`.
@@ -163,7 +177,7 @@ def get_chat_messages(
     return [_summary(row, resolver) for row in rows]
 
 
-@mcp.tool()
+@apps.tool(resource_uri=PREVIEW_URI, meta=LEGACY_UI_META)
 def search_messages(
     query: str = "",
     limit: int = 30,
@@ -177,6 +191,10 @@ def search_messages(
     Backed by a local index of decoded message bodies, which is brought up to
     date automatically. The first search on a large history has to build that
     index and may take a while; later searches are fast.
+
+    In Claude the result renders as an inline card, so don't repeat its
+    contents in your reply — a one-line summary or the answer to the
+    user's question is enough.
 
     Args:
         query: Text to look for (case-insensitive substring match). Leave it
@@ -209,9 +227,13 @@ def search_messages(
     )
 
 
-@mcp.tool()
+@apps.tool(resource_uri=PREVIEW_URI, meta=LEGACY_UI_META)
 def get_message(message_id: int) -> MessageDetail:
     """Read one message in full, including attachments and delivery times.
+
+    In Claude the result renders as an inline card, so don't repeat its
+    contents in your reply — a one-line summary or the answer to the
+    user's question is enough.
 
     Args:
         message_id: Message id from `search_messages` or `get_chat_messages`.
@@ -226,7 +248,6 @@ def get_message(message_id: int) -> MessageDetail:
     return MessageDetail(**row, sender_name=_get_contacts().name_for(row.get("sender")))
 
 
-@mcp.tool()
 def get_attachment(attachment_id: int) -> AttachmentData:
     """Retrieve an attachment's bytes, base64-encoded.
 
@@ -271,7 +292,6 @@ def get_attachment(attachment_id: int) -> AttachmentData:
     )
 
 
-@mcp.tool()
 def refresh_search_index(rebuild: bool = False) -> SearchIndexStatus:
     """Update the local search index, and report on it.
 
@@ -293,7 +313,6 @@ def refresh_search_index(rebuild: bool = False) -> SearchIndexStatus:
     return SearchIndexStatus(**{**status, **report})
 
 
-@mcp.tool()
 def compose_message(
     handle: str, body: str = "", service: str = "imessage"
 ) -> ComposeResult:
@@ -316,7 +335,6 @@ def compose_message(
     return ComposeResult(**result.as_dict())
 
 
-@mcp.tool()
 def send_message(chat_id: int, body: str, confirm: bool = False) -> SendResult:
     """Send a message to an existing conversation. This delivers immediately.
 
@@ -362,6 +380,18 @@ def send_message(chat_id: int, body: str, confirm: bool = False) -> SendResult:
         body=result["body"],
         characters=result["characters"],
     )
+
+
+# The preview tools arrive through the extension; the rest are plain tools.
+mcp = MCPServer("apple-messages", extensions=[apps])
+for _tool in (
+    get_stats,
+    get_attachment,
+    refresh_search_index,
+    compose_message,
+    send_message,
+):
+    mcp.add_tool(_tool)
 
 
 def main() -> None:
