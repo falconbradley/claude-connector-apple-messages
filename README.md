@@ -275,7 +275,7 @@ Every connector in the family releases the same way:
 2. Add a section for the version to [CHANGELOG.md](CHANGELOG.md).
 3. Commit, tag `vX.Y.Z`, and push the tag: `git push origin main vX.Y.Z`.
 
-The [release workflow](.github/workflows/release.yml) then runs the tests, checks the tag matches all three version files, builds with `./build.sh`, and publishes `apple-messages.mcpb` and `apple-messages-X.Y.Z.mcpb` to a GitHub release whose notes are that version's CHANGELOG section.
+The [release workflow](.github/workflows/release.yml) then checks the tag matches all three version files, runs `./build.sh` (tests, manifest and tool checks, pack), and publishes `apple-messages-X.Y.Z.mcpb` to a GitHub release whose notes are that version's CHANGELOG section.
 
 ## License
 
