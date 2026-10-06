@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .index import SearchIndex, SearchIndexError
+from .launcher import full_disk_access_steps
 from .typedstream import OBJECT_REPLACEMENT, message_text
 
 logger = logging.getLogger("apple_messages_mcp.db")
@@ -167,10 +168,7 @@ class MessagesDB:
         return (
             "Cannot read the Messages database — Full Disk Access is not "
             "granted.\n\n"
-            "Open System Settings -> Privacy & Security -> Full Disk Access, "
-            "enable the app hosting this extension (Claude), then quit and "
-            "reopen it. macOS caches this permission at launch, so the restart "
-            "is required.\n\n"
+            + full_disk_access_steps() + "\n\n"
             "Unlike the Apple Mail extension, this cannot be avoided: Messages' "
             "scripting interface exposes no message class, so message bodies "
             "are only readable from the database."

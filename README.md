@@ -72,16 +72,39 @@ metadata, the resource, and the result shapes the card dispatches on.
 ## Requirements
 
 - macOS 13 Ventura or later. RCS requires macOS 26 or later.
-- **Full Disk Access** for the Claude app — required for reading.
+- **Full Disk Access** for the `uv` that Claude Desktop launches the extension
+  with — required for reading. Enabling Claude itself is not enough.
 - Automation permission for Messages — required for sending and for contact
   names. macOS prompts for this one automatically.
 
+## Installation
+
+Download the latest `.mcpb` from [Releases](../../releases), then **double-click** to install.
+
 ### Granting Full Disk Access
 
-1. System Settings → Privacy & Security → Full Disk Access
-2. Enable **Claude** (add `/Applications/Claude.app` with **+** if it isn't listed)
-3. **Quit and reopen Claude.** macOS caches this permission at process launch, so
-   the restart is mandatory — the extension will keep failing without it.
+Claude Desktop launches extension servers through a helper that makes the
+spawned `uv` responsible for their permissions, so macOS checks Full Disk
+Access against that `uv`, not against Claude.
+
+1. System Settings → Privacy & Security → Full Disk Access → **+**
+2. Press ⌘⇧G and paste the `uv` path. The extension's error message prints the
+   exact one; it has the form
+   `~/Library/Application Support/Claude/uv-runtime/<version>/uv`.
+3. **Quit and reopen Claude (⌘Q).** macOS caches this permission at process
+   launch, so the restart is mandatory — the extension will keep failing
+   without it.
+
+### Using several Apple connectors
+
+This connector is one of a family of Claude Desktop extensions for Apple apps — [Mail](https://github.com/falconbradley/claude-connector-apple-mail), **Messages**, [Contacts](https://github.com/falconbradley/claude-connector-apple-contacts), [Calendar](https://github.com/falconbradley/claude-connector-apple-calendar), [Reminders](https://github.com/falconbradley/claude-connector-apple-reminders), [Notes](https://github.com/falconbradley/claude-connector-apple-notes) — and they share the same setup quirks:
+
+- **Install them one at a time.** Opening several `.mcpb` files at once can leave Claude Desktop showing only the last install dialog, so the others silently never install. Approve each dialog before opening the next, then check **Settings → Extensions**.
+- **Permissions belong to `uv`, not Claude.** Claude Desktop launches every extension through the same bundled `uv` and macOS attributes their privacy grants to it. Full Disk Access granted once to `~/Library/Application Support/Claude/uv-runtime/<version>/uv` covers Mail, Notes, Messages, and Reminders together; the Contacts, Calendars, and Reminders panes list the connectors as **uv**. Permission errors print the exact path in use, ready to paste.
+- **Re-grant after Claude Desktop updates `uv`.** The `<version>` folder changes and macOS treats the new binary as a new app. Symptoms: Mail and Notes searches report `"engine": "applescript"` and get slow, Messages reads and Reminders tags fail with a Full Disk Access error.
+- **Restart after granting.** Quit Claude (⌘Q) and reopen it — macOS reads Full Disk Access only at launch.
+- **Verify.** Ask Claude for each connector's stats (`get_stats`). For Mail and Notes, a search result's `engine` should be `"sqlite"`.
+
 
 ## Why this needs Full Disk Access when Apple Mail doesn't
 
@@ -243,6 +266,16 @@ against the same synthetic database, with a stub in place of the contact
 resolver so it never scripts Messages.app.
 
 None of the suites touch the real search index; each injects a temporary one.
+
+## Releasing
+
+Every connector in the family releases the same way:
+
+1. Bump the version in `pyproject.toml`, `manifest.json`, and `src/apple_messages_mcp/__init__.py`, then run `uv lock` so `uv.lock` matches. CI fails if the three disagree.
+2. Add a section for the version to [CHANGELOG.md](CHANGELOG.md).
+3. Commit, tag `vX.Y.Z`, and push the tag: `git push origin main vX.Y.Z`.
+
+The [release workflow](.github/workflows/release.yml) then runs the tests, checks the tag matches all three version files, builds with `./build.sh`, and publishes `apple-messages.mcpb` and `apple-messages-X.Y.Z.mcpb` to a GitHub release whose notes are that version's CHANGELOG section.
 
 ## License
 

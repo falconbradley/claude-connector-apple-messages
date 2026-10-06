@@ -64,6 +64,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .applescript import ContactResolver
 from .db import MessagesDB, MessagesDBError
+from .launcher import full_disk_access_steps
 from .models import (
     AttachmentData,
     ChatSummary,
@@ -281,7 +282,7 @@ def get_attachment(attachment_id: int) -> AttachmentData:
     except PermissionError as exc:
         raise RuntimeError(
             "Cannot read the attachment — Full Disk Access is required for "
-            "~/Library/Messages/Attachments."
+            "~/Library/Messages/Attachments.\n\n" + full_disk_access_steps()
         ) from exc
 
     return AttachmentData(
